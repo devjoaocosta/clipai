@@ -4,3 +4,4 @@ __pycache__/
 work/
 output/
 .pytest_cache/
+PLAN*.md
