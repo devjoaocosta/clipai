@@ -1,3 +1,12 @@
+"""Detecção de kills por leitura do placar do LoL.
+
+Produção: amostra a região do placar (ffmpeg), extrai a assinatura do glifo de
+abates (`_kills_slot_vector`) e detecta mudanças persistentes
+(`_events_from_signatures`). O caminho OCR de valores (parse_kill_total,
+increment_events etc.) lê o dígito por tesseract e é mantido como suporte de
+calibração/testes — na prática os glifos de 8px são ilegíveis por OCR.
+"""
+
 import os
 import re
 import shutil
@@ -18,22 +27,19 @@ DEFAULT_REGION = "0.785,0.004,0.110,0.028"
 CONFIRM_FRAMES = 3
 MAX_KILL_JUMP = 5
 
-# Faixa (fração absoluta de x) da coluna do streamer na linha superior direita.
-# Layout: [kills time] [vs] [kills time] [KDA do streamer].
-# A coluna do streamer mostra K/D/A (ex.: "3/5/11"); lemos o PRIMEIRO número
-# (kills). Banda medida nos frames reais do VOD de teste.
+# Layout da linha superior direita: [kills time] [vs] [kills time] [KDA do
+# streamer]. Lemos o 1º número do KDA (kills). Banda medida nos frames reais.
 KILL_COLUMNS = [
     ("streamer", 0.865, 0.895),
 ]
 
 # Slot de ABATES do streamer (1º número do K/D/A): banda global x [0.846, 0.858].
-# Glifos do HUD são CLAROS sobre fundo escuro (thr alto separa bem). Medido nos
-# frames reais: dígito único em x ~0.8486-0.8527; dois dígitos ("10"..) em
-# 0.8491-0.8512 + 0.8522-0.8563. Telas de loading/pós-jogo → banda vazia.
+# Glifos claros sobre fundo escuro (thr alto separa bem); dígito único
+# ~0.8486-0.8527, dois dígitos 0.8491-0.8512 + 0.8522-0.8563; loading/pós-jogo
+# → banda vazia.
 KILLS_SLOT_X = (0.846, 0.858)
 KILLS_GLYPH_THR = 80
-# NCC do vetor 12x26 normalizado: MESMO valor >= 0.997, valores diferentes
-# <= 0.93 nos frames reais → 0.95 separa com folga.
+# NCC do vetor 12x26 normalizado: mesmo valor >= 0.997, diferente <= 0.93 → 0.95 separa.
 KILLS_SAME_NCC = 0.95
 # Frames None (HUD oculto) seguidos antes de uma mudança → reset de partida.
 KILLS_RESET_GAP = 3
@@ -138,14 +144,12 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
 
 def _kills_slot_vector(img: np.ndarray, x_origin: float,
                        region_w: float) -> np.ndarray | None:
-    """Vetor normalizado do glifo de abates (slot global [0.846, 0.858]).
+    """Vetor normalizado 12x26 (z-score) do glifo de abates.
 
-    Recorta a banda, autocorta verticalmente e normaliza para 12x26 (z-score).
-    O vetor é ESTÁVEL entre frames do mesmo valor (NCC >= 0.997) e distinto
-    entre valores diferentes (NCC <= 0.93) — por isso a detecção de eventos
-    compara o vetor por NCC em vez de classificar o dígito (inviável: os
-    glifos de 8px são ilegíveis até por OCR). Banda vazia (loading/pós-jogo)
-    devolve None.
+    Estável entre frames do mesmo valor (NCC >= 0.997) e distinto entre valores
+    diferentes (NCC <= 0.93) → a detecção compara o vetor por NCC em vez de
+    classificar o dígito (glifos de 8px ilegíveis até por OCR). Banda vazia
+    (loading/pós-jogo) devolve None.
     """
     lo = (KILLS_SLOT_X[0] - x_origin) / region_w
     hi = (KILLS_SLOT_X[1] - x_origin) / region_w
@@ -176,13 +180,11 @@ def _events_from_signatures(samples: list[tuple[float, np.ndarray | None]],
     """Dispara quando o glifo de ABATES muda e persiste por `confirm_frames`.
 
     - Mesmo vetor (NCC >= KILLS_SAME_NCC) → nada (inclui mortes mudando).
-    - Mudança persistente → evento (abate confirmado).
-    - Mudança precedida por >= `reset_gap` frames None (HUD oculto) → reset
-      de partida: vira baseline novo SEM evento.
-    - Frames None → ignora (telas de loading/pós-jogo).
+    - Mudança precedida por >= `reset_gap` frames None (HUD oculto) → reset de
+      partida: baseline novo SEM evento. Frames None são ignorados.
 
-    O total do evento é um contador de abates detectados (a leitura do dígito
-    é inviável; só o log usa o total). Retorna (ts, coluna, total).
+    O total é um contador de abates detectados (leitura do dígito inviável; só
+    o log usa). Retorna (ts, coluna, total).
     """
     events: list[tuple[float, str, int]] = []
     last: np.ndarray | None = None
@@ -251,21 +253,18 @@ def _as_kill_value(text: str) -> int | None:
 
 
 def _as_kda_kills(text: str) -> int | None:
-    """Extrai KILLS (primeiro número) de um KDA tipo "3/5/11".
+    """Extrai KILLS (1º número) de um KDA tipo "3/5/11".
 
-    O OCR do HUD lê a coluna do streamer como K/D/A (ex.: "3/5/11", "8/11/",
-    "#6", "10."). Separamos no primeiro segmento (por "/", espaço ou "."),
-    corrigimos dígitos ambíguos e extraímos o inteiro. Não passa por
-    `_as_kill_value` direto, senão "/" viraria "7" e juntaria tudo.
+    Separa no primeiro segmento (por "/", espaço ou "."), corrige dígitos
+    ambíguos e extrai o inteiro. Não passa por `_as_kill_value`, senão "/"
+    viraria "7" e juntaria tudo.
     """
     first = re.split(r"[/\s.]+", text, maxsplit=1)[0]
-    # Token sem dígito real é separador do placar (ex.: "|" em "28 vs 30 | #9"),
-    # não um KDA. Rejeita antes de qualquer correção, senão _fix_digits
-    # transformaria "|" em "1" e travaria o contador.
+    # Token sem dígito é separador do placar (ex.: "|"), não um KDA; rejeita
+    # antes da correção, senão "|" viraria "1" e travaria o contador.
     if not re.search(r"\d", first):
         return None
-    # OCR pode fundir separador + KDA ("|#9"); remove não-dígitos à esquerda
-    # mantendo os dígitos do primeiro número.
+    # OCR pode fundir separador + KDA ("|#9"); remove não-dígitos à esquerda.
     first = re.sub(r"^[^0-9]+", "", first)
     fixed = _fix_digits(first)
     digits = re.sub(r"[^0-9]", "", fixed)
@@ -330,11 +329,9 @@ def parse_kill_total(img: np.ndarray, x_origin: float = 0.0,
                      region_w: float = 1.0) -> tuple[int | None, ...] | None:
     """Lê as kills do streamer (1ª número do KDA) da faixa superior direita.
 
-    A coluna é lida num recorte (banda) isolado por OCR psm 6, escolhendo o
-    token mais próximo do centro da banda. Isso evita que o OCR de linha
-    inteira funda colunas vizinhas. Se a banda não achar valor, cai no
-    token-span (o token que cruza a coluna). Devolve uma tupla com um elemento
-    por coluna em `KILL_COLUMNS` (hoje só a do streamer), ou `None`.
+    Lê a coluna por OCR psm 6 escolhendo o token mais próximo do centro da
+    banda (evita fundir colunas vizinhas); sem valor na banda, cai no
+    token-span. Devolve uma tupla por coluna em `KILL_COLUMNS`, ou `None`.
     """
     groups = _ocr_groups(img)
     values = tuple(
@@ -348,16 +345,12 @@ def parse_kill_total(img: np.ndarray, x_origin: float = 0.0,
 
 def _band_value(img: np.ndarray, groups: list[tuple[int, int, str]],
                 name: str, x_origin: float, region_w: float) -> int | None:
-    """Lê o valor da coluna `name` a partir dos tokens OCR da região inteira.
+    """Valor da coluna `name` a partir dos tokens OCR da região inteira.
 
-    Seleciona os tokens cujo span global cruza a banda `[blo, bhi]` da coluna
-    e devolve o valor do token **mais à esquerda** (menor x). Na coluna KDA do
-    streamer a kill é o primeiro (esquerdo) número do K/D/A; escolher por
-    proximidade do centro da banda pegava a morte (número central) quando o
-    OCR lia os números separados (`3`, `5`, `11`). Tokens com centro fora da
-    banda (ex.: kills do time azul invadindo a borda) só são usados como
-    fallback. Não re-OCRa um recorte isolado: na coluna KDA o recorte estreito
-    fragmenta tokens (ex.: `3/5/11` → `1`).
+    Escolhe o token com span cruzando a banda `[blo, bhi]` com menor x (na
+    coluna KDA a kill é o 1º número; por centro da banda pegava a morte quando
+    o OCR lia os números separados). Tokens com centro fora da banda só como
+    fallback. Não re-OCRa recorte isolado (fragmenta "3/5/11" → "1").
     """
     _name, blo, bhi = next(c for c in KILL_COLUMNS if c[0] == name)
     in_band: list[tuple[float, int]] = []
@@ -386,18 +379,15 @@ def increment_events(
 ) -> list[tuple[float, str, int]]:
     """Dispara quando a KILL do streamer (1ª número do KDA) incrementa.
 
-    - Saltos de até MAX_KILL_JUMP confirmados em `confirm_frames` → evento.
-    - Saltos grandes podem ser misread do OCR OU lacuna de cobertura (placar
-      oculto): só viram novo baseline (sem evento) se persistirem por
-      `confirm_frames`; caso contrário são ignorados. Isso evita travar o
-      tracker em baseline obsoleto (wedging).
-    - Queda PEQUENA (≤ MAX_KILL_JUMP) NÃO reseta o baseline: dentro de uma
-      partida o placar só sobe, então queda pequena é misread do OCR e deve
-      ser ignorada (evita re-disparar o mesmo total após um frame ruim).
-    - Queda GRANDE (> MAX_KILL_JUMP) é reset de partida: vira baseline novo
-      se persistir por `confirm_frames`.
+    - Salto de até MAX_KILL_JUMP confirmado em `confirm_frames` → evento.
+    - Salto GRANDE: misread OU lacuna de cobertura (placar oculto); só vira
+      baseline novo (sem evento) se persistir por `confirm_frames` — evita
+      travar o tracker em baseline obsoleto (wedging).
+    - Queda PEQUENA (≤ MAX_KILL_JUMP) não reseta: dentro de uma partida o
+      placar só sobe, então é misread (evita re-disparar após frame ruim).
+    - Queda GRANDE é reset de partida: baseline novo se persistir.
 
-    Retorna eventos como (ts, coluna, total).
+    Retorna eventos (ts, coluna, total).
     """
     events: list[tuple[float, str, int]] = []
     state: dict[str, dict] = {}

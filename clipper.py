@@ -20,24 +20,28 @@ def _which(name: str) -> str:
     return path
 
 
+def _ffprobe(args: list[str]) -> str:
+    """Roda `ffprobe -v error` com `args` e devolve a saída decodificada."""
+    out = subprocess.check_output(
+        [_which("ffprobe"), "-v", "error", *args],
+        creationflags=CREATE_NO_WINDOW)
+    return out.decode()
+
+
 def ffprobe_duration(path: str) -> float:
-    cmd = [
-        _which("ffprobe"), "-v", "error",
+    out = _ffprobe([
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", path,
-    ]
-    out = subprocess.check_output(cmd, creationflags=CREATE_NO_WINDOW)
-    return float(out.decode().strip())
+    ])
+    return float(out.strip())
 
 
 def _video_frame_rate(path: str) -> float:
-    cmd = [
-        _which("ffprobe"), "-v", "error", "-select_streams", "v:0",
+    text = _ffprobe([
+        "-select_streams", "v:0",
         "-show_entries", "stream=avg_frame_rate",
         "-of", "csv=p=0", path,
-    ]
-    out = subprocess.check_output(cmd, creationflags=CREATE_NO_WINDOW)
-    text = out.decode().strip()
+    ]).strip()
     if "/" not in text:
         return 0.0
     num, den = text.split("/")
@@ -50,12 +54,11 @@ def video_size(path: str) -> tuple[int, int]:
     Sem stream de vídeo (ex.: arquivo só de áudio de VOD subscriber-only),
     sobe RuntimeError com mensagem clara em vez de int('').
     """
-    cmd = [
-        _which("ffprobe"), "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", path,
-    ]
-    out = subprocess.check_output(cmd, creationflags=CREATE_NO_WINDOW)
-    text = out.decode().strip()
+    text = _ffprobe([
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=s=x:p=0", path,
+    ]).strip()
     if "x" not in text or not text.split("x")[0].isdigit():
         raise RuntimeError(
             "VOD sem stream de vídeo — provavelmente restrito a assinantes "
@@ -112,14 +115,13 @@ def _verify_clip(out_path: str, expected_length: float,
     vídeo com dts >= 0. Devolve (ok, mensagem).
     """
     try:
-        out = subprocess.check_output([
-            _which("ffprobe"), "-v", "error",
+        out = _ffprobe([
             "-show_entries", "format=duration,start_time",
             "-show_entries", "stream=codec_type,time_base,height",
             "-show_entries", "packet=dts,stream_index",
             "-of", "json", out_path,
-        ], creationflags=CREATE_NO_WINDOW)
-        data = json.loads(out.decode())
+        ])
+        data = json.loads(out)
     except Exception as e:
         return False, f"não foi possível ler o clipe: {e}"
 

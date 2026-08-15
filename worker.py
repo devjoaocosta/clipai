@@ -64,6 +64,10 @@ class Worker(threading.Thread):
         self.emit({"type": "progress", "phase": phase,
                    "fraction": fraction, "status": status})
 
+    def _fail_no_video(self) -> None:
+        log.error("VOD sem stream de vídeo: %s", NO_VIDEO_MSG)
+        self.emit({"type": "error", "message": NO_VIDEO_MSG})
+
     def run(self) -> None:
         try:
             self._run()
@@ -101,8 +105,7 @@ class Worker(threading.Thread):
 
             # 1.5) VOD sem stream de vídeo (subscriber-only) → aborta antes de baixar
             if info is not None and not downloader.has_video(info.get("formats", [])):
-                log.error("VOD sem stream de vídeo: %s", NO_VIDEO_MSG)
-                self.emit({"type": "error", "message": NO_VIDEO_MSG})
+                self._fail_no_video()
                 return
 
             # 2) Download
@@ -120,8 +123,7 @@ class Worker(threading.Thread):
         try:
             clipper.video_size(vod_path)
         except Exception:
-            log.error("VOD sem stream de vídeo: %s", NO_VIDEO_MSG)
-            self.emit({"type": "error", "message": NO_VIDEO_MSG})
+            self._fail_no_video()
             self._cleanup(vod_path)
             return
 
