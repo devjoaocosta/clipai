@@ -1,0 +1,5 @@
+# Instale junto com requirements.txt se quiser usar GPU NVIDIA
+# (ou simplesmente deixe de fora: o app cai para CPU automaticamente)
+nvidia-cuda-runtime-cu12
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
