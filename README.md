@@ -87,12 +87,28 @@ transcriber.py  faster-whisper (CUDA/CPU)
 matcher.py      detecção de palavras-chave + merge
 killtracker.py  detecção de kills por OCR do placar (tesseract)
 clipper.py      ffmpeg/ffprobe (corte e duração)
-config.py       configurações padrão
+config.py       configurações padrão + persistência em config.json
+log.py          logging padrão (encaminha logs à UI)
 tests/          testes unitários do matcher e do killtracker
+```
+
+As configurações da UI são salvas em `config.json` na raiz ao fechar o app
+(região do placar, keywords, modelo etc.) e recarregadas na próxima abertura.
+
+## Instalação para desenvolvimento
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"   # inclui ruff, mypy e pytest
 ```
 
 ## Testes
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
+ruff check .
+mypy
 ```
+
+Lint e typecheck são verificados no CI (GitHub Actions) para Python 3.11–3.14.

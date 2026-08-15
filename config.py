@@ -1,4 +1,10 @@
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, fields
+
+CONFIG_FILE = "config.json"
+
+# Campos por sessão (URL/arquivo local não devem ser persistidos).
+_SESSION_FIELDS = ("url", "local_file")
 
 
 @dataclass
@@ -25,6 +31,31 @@ class Config:
     @property
     def keyword_list(self) -> list[str]:
         return [k.strip() for k in self.keywords.split(",") if k.strip()]
+
+    def save(self, path: str = CONFIG_FILE) -> None:
+        data = {
+            f.name: getattr(self, f.name)
+            for f in fields(self)
+            if f.name not in _SESSION_FIELDS
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def from_file(cls, path: str = CONFIG_FILE) -> "Config":
+        cfg = cls()
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return cfg
+        if not isinstance(data, dict):
+            return cfg
+        known = {f.name for f in fields(cls)}
+        for key, value in data.items():
+            if key in known and not isinstance(value, dict):
+                setattr(cfg, key, value)
+        return cfg
 
 
 MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"]

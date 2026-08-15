@@ -3,9 +3,17 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from killtracker import (_as_kda_kills, _as_kill_value, _band_value,
-                         _events_from_signatures, _kills_slot_vector, _ncc,
-                         increment_events, parse_kill_total, parse_region)
+from killtracker import (
+    _as_kda_kills,
+    _as_kill_value,
+    _band_value,
+    _events_from_signatures,
+    _kills_slot_vector,
+    _ncc,
+    increment_events,
+    parse_kill_total,
+    parse_region,
+)
 
 ORIGIN, REGION_W = 0.785, 0.110
 FIX_DIR = os.path.join(os.path.dirname(__file__), "fixtures")

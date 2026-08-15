@@ -2,9 +2,14 @@ import glob
 import os
 import sys
 
+from log import get_logger
+
+log = get_logger("transcriber")
+
 
 def _setup_cuda_paths() -> None:
-    nv = os.path.join(os.path.dirname(sys.executable), "..", "Lib", "site-packages", "nvidia")
+    nv = os.path.join(os.path.dirname(sys.executable), "..", "Lib",
+                      "site-packages", "nvidia")
     paths = sorted(glob.glob(os.path.join(nv, "*", "bin")))
     if paths:
         os.environ["PATH"] = os.pathsep.join(paths + [os.environ.get("PATH", "")])
@@ -33,7 +38,7 @@ class Transcriber:
         self.vad_filter = vad_filter
 
     def transcribe(self, audio_path: str, keywords: list[str],
-                   duration: float, progress_cb=None, log_cb=None):
+                   duration: float, progress_cb=None):
         from faster_whisper import WhisperModel
 
         device = self.device
@@ -43,16 +48,15 @@ class Transcriber:
         if compute_type == "auto":
             compute_type = "float16" if device == "cuda" else "int8"
 
-        if log_cb:
-            log_cb(f"Transcrevendo com faster-whisper ({self.model}, device={device}, "
-                   f"compute={compute_type})...")
+        log.info("Transcrevendo com faster-whisper (%s, device=%s, "
+                 "compute=%s)...", self.model, device, compute_type)
 
         try:
             model = WhisperModel(self.model, device=device, compute_type=compute_type)
         except Exception as e:
             if device == "cuda":
-                if log_cb:
-                    log_cb(f"Falha ao usar CUDA ({e}). Fazendo fallback para CPU int8.")
+                log.warning("Falha ao usar CUDA (%s). Fazendo fallback para "
+                            "CPU int8.", e)
                 device, compute_type = "cpu", "int8"
                 model = WhisperModel(self.model, device="cpu", compute_type="int8")
             else:
@@ -69,7 +73,7 @@ class Transcriber:
             beam_size=5,
         )
 
-        words = []
+        words: list[tuple[float, float, str]] = []
         for seg in segments:
             if seg.words:
                 words.extend((w.start, w.end, w.word) for w in seg.words)

@@ -5,3 +5,7 @@ work/
 output/
 .pytest_cache/
 PLAN*.md
+config.json
+*.egg-info/
+build/
+dist/

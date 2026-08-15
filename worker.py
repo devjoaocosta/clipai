@@ -8,8 +8,11 @@ import clipper
 import downloader
 import killtracker
 from config import Config
+from log import get_logger
 from matcher import Word, clip_window, find_matches, near_misses, ts
 from transcriber import Transcriber
+
+log = get_logger("worker")
 
 NO_VIDEO_MSG = ("VOD sem vídeo disponível. O VOD é restrito a assinantes "
                 "(subscriber-only) — o Twitch só expõe o áudio sem login. "
@@ -57,17 +60,15 @@ class Worker(threading.Thread):
     def cancel(self) -> None:
         self._stop.set()
 
-    def _log(self, message: str) -> None:
-        self.emit({"type": "log", "message": message})
-
     def _progress(self, phase: str, fraction=None, status="") -> None:
-        self.emit({"type": "progress", "phase": phase, "fraction": fraction, "status": status})
+        self.emit({"type": "progress", "phase": phase,
+                   "fraction": fraction, "status": status})
 
     def run(self) -> None:
         try:
             self._run()
         except Exception as e:
-            self._log(f"ERRO: {e}")
+            log.exception("ERRO: %s", e)
             self.emit({"type": "error", "message": str(e)})
 
     def _run(self) -> None:
@@ -84,7 +85,7 @@ class Worker(threading.Thread):
             vod_path = os.path.abspath(cfg.local_file)
             if not os.path.isfile(vod_path):
                 raise RuntimeError(f"Arquivo local não encontrado: {cfg.local_file}")
-            self._log(f"Usando arquivo local: {vod_path}")
+            log.info("Usando arquivo local: %s", vod_path)
             self._progress("download", 1.0, "arquivo local pronto")
         else:
             self._is_local = False
@@ -92,24 +93,25 @@ class Worker(threading.Thread):
             try:
                 info = downloader.extract_info(cfg.url)
                 duration = float(info.get("duration") or 0) or None
-                self._log(f"VOD encontrado: {info.get('title', '')} "
-                          f"({info.get('duration', 0) / 3600:.1f}h)")
+                log.info("VOD encontrado: %s (%.1fh)", info.get("title", ""),
+                         (info.get("duration", 0) or 0) / 3600)
             except Exception as e:
-                self._log(f"Não consegui obter metadados ({e}); seguindo só com o download.")
+                log.warning("Não consegui obter metadados (%s); seguindo só "
+                            "com o download.", e)
 
             # 1.5) VOD sem stream de vídeo (subscriber-only) → aborta antes de baixar
             if info is not None and not downloader.has_video(info.get("formats", [])):
-                self._log(f"ERRO: {NO_VIDEO_MSG}")
+                log.error("VOD sem stream de vídeo: %s", NO_VIDEO_MSG)
                 self.emit({"type": "error", "message": NO_VIDEO_MSG})
                 return
 
             # 2) Download
             self._progress("download", None, "baixando VOD...")
-            self._log("Baixando VOD (isso pode demorar)...")
+            log.info("Baixando VOD (isso pode demorar)...")
             vod_path = downloader.download_vod(
                 cfg.url, cfg.work_dir, progress_cb=self._on_download_progress)
             self._progress("download", 1.0, "VOD baixado")
-            self._log(f"VOD em: {vod_path}")
+            log.info("VOD em: %s", vod_path)
 
             if self._stop.is_set():
                 return
@@ -118,7 +120,7 @@ class Worker(threading.Thread):
         try:
             clipper.video_size(vod_path)
         except Exception:
-            self._log(f"ERRO: {NO_VIDEO_MSG}")
+            log.error("VOD sem stream de vídeo: %s", NO_VIDEO_MSG)
             self.emit({"type": "error", "message": NO_VIDEO_MSG})
             self._cleanup(vod_path)
             return
@@ -133,15 +135,14 @@ class Worker(threading.Thread):
         working, original = clipper.ensure_1080p(
             vod_path, cfg.work_dir,
             progress_cb=lambda f: self._progress(
-                "transcode", f, "reduzindo VOD para 1080p..."),
-            log_cb=self._log)
+                "transcode", f, "reduzindo VOD para 1080p..."))
         self._vod_original = original
         vod_path = working
         if working == original:
-            self._log("VOD já em resolução ≤ 1080p.")
+            log.info("VOD já em resolução <= 1080p.")
         else:
             self._progress("transcode", 1.0, "VOD em 1080p")
-            self._log(f"VOD reduzido para 1080p: {vod_path}")
+            log.info("VOD reduzido para 1080p: %s", vod_path)
 
         wants_kills = cfg.mode in ("kills", "both")
         wants_keywords = cfg.mode in ("keywords", "both")
@@ -167,7 +168,7 @@ class Worker(threading.Thread):
         moments = [(t, "kill") for t, _col, _total in self.kill_events]
         moments += [(m.time, m.keyword) for m in self.matches]
         merged = merge_moments(moments, cfg.merge_window)
-        self._log(f"Encontrados {len(merged)} momento(s) interessante(s).")
+        log.info("Encontrados %s momento(s) interessante(s).", len(merged))
 
         if not merged:
             self.emit({"type": "done", "clips": []})
@@ -181,7 +182,7 @@ class Worker(threading.Thread):
                 break
             window = clip_window(t, duration, cfg.offset_before, cfg.clip_length)
             if not window:
-                self._log(f"[{label} @ {ts(t)}] pulado: muito perto do fim.")
+                log.info("[%s @ %s] pulado: muito perto do fim.", label, ts(t))
                 continue
             start, end = window
             slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or "clip"
@@ -193,7 +194,7 @@ class Worker(threading.Thread):
             results.append(ClipResult(index=i, keyword=label,
                                       keyword_time=t, clip_start=start,
                                       clip_end=end, file=out_path))
-            self._log(f"Clipe criado: {out_name} (keyword @ {ts(t)})")
+            log.info("Clipe criado: %s (keyword @ %s)", out_name, ts(t))
             self.emit({"type": "clip_done", "clip": results[-1]})
 
         self._progress("clip", 1.0, "clipes criados")
@@ -212,10 +213,10 @@ class Worker(threading.Thread):
                                   vad_filter=cfg.vad_filter)
         words, info = transcriber.transcribe(
             vod_path, cfg.keyword_list, duration,
-            progress_cb=lambda f: self._progress("transcribe", f, "transcrevendo áudio..."),
-            log_cb=self._log)
+            progress_cb=lambda f: self._progress(
+                "transcribe", f, "transcrevendo áudio..."))
         self._progress("transcribe", 1.0, "transcrição concluída")
-        self._log(f"Transcrição concluída ({len(words)} palavras).")
+        log.info("Transcrição concluída (%s palavras).", len(words))
         self._dump_transcript(words)
         word_objs = [Word(s, e, w) for s, e, w in words]
 
@@ -225,26 +226,28 @@ class Worker(threading.Thread):
         matches = find_matches(
             word_objs, cfg.keyword_list, cfg.merge_window, cfg.fuzzy_threshold)
         for t, text, kw, ratio in near_misses(word_objs, cfg.keyword_list):
-            self._log(f"quase: '{text}' @ {ts(t)} ~ '{kw}' ({ratio:.2f})")
+            log.info("quase: '%s' @ %s ~ '%s' (%.2f)", text, ts(t), kw, ratio)
         self.matches = matches
 
     def _run_kills(self, vod_path: str) -> None:
         cfg = self.cfg
         self._progress("kills", 0.0, "lendo placar de kills...")
-        self._log("Lendo placar de kills (OCR)...")
+        log.info("Lendo placar de kills (OCR)...")
         try:
             events = killtracker.detect_kill_events(
                 vod_path, cfg.kill_region, cfg.kill_fps,
                 work_dir=cfg.work_dir,
                 progress_cb=None if cfg.mode == "both" else
                 lambda f: self._progress("kills", f, "lendo placar de kills..."),
-                log_cb=self._log, stop_event=self._stop)
+                stop_event=self._stop)
         except Exception as e:
-            self._log(f"Falha ao ler o placar: {e}")
+            log.warning("Falha ao ler o placar: %s", e)
+            self.emit({"type": "warning",
+                       "message": f"Falha ao ler o placar (modo kills): {e}"})
             return
         self.kill_events = events
         for t, col, total in events:
-            self._log(f"kill detectada @ {ts(t)} ({col}: {total})")
+            log.info("kill detectada @ %s (%s: %s)", ts(t), col, total)
         self._progress("kills", 1.0, "placar lido")
 
     def _on_download_progress(self, d) -> None:
@@ -263,7 +266,7 @@ class Worker(threading.Thread):
         with open(path, "w", encoding="utf-8") as f:
             for s, e, w in words:
                 f.write(f"{s:.2f}\t{e:.2f}\t{w.strip()}\n")
-        self._log(f"Transcrição completa salva em {path}")
+        log.info("Transcrição completa salva em %s", path)
 
     def _write_csv(self, results: list[ClipResult]) -> None:
         path = os.path.join(self.cfg.output_dir, "clips.csv")
@@ -274,7 +277,7 @@ class Worker(threading.Thread):
             for r in results:
                 writer.writerow([r.index, r.keyword, f"{r.keyword_time:.1f}",
                                  f"{r.clip_start:.1f}", f"{r.clip_end:.1f}", r.file])
-        self._log(f"Índice salvo em {path}")
+        log.info("Índice salvo em %s", path)
 
     def _cleanup(self, vod_path: str) -> None:
         if not self.cfg.delete_vod:
@@ -291,6 +294,6 @@ class Worker(threading.Thread):
                 continue
             try:
                 os.remove(path)
-                self._log(f"VOD removido: {os.path.basename(path)}")
+                log.info("VOD removido: %s", os.path.basename(path))
             except OSError as e:
-                self._log(f"Não foi possível remover o VOD: {e}")
+                log.warning("Não foi possível remover o VOD: %s", e)

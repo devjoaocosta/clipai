@@ -45,7 +45,8 @@ def _token_hit(wtok: str, ktok: str) -> bool:
     return False
 
 
-def _concat_matches(tokens: list[str], kw_tokens: list[str], fuzzy_ratio: float) -> bool:
+def _concat_matches(tokens: list[str], kw_tokens: list[str],
+                    fuzzy_ratio: float) -> bool:
     if not tokens or not kw_tokens:
         return False
     a = "".join(tokens)

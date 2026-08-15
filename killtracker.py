@@ -2,14 +2,17 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Iterator
 
 import numpy as np
 import pytesseract
 from PIL import Image
 
 from clipper import _which, video_size
+from log import get_logger
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+log = get_logger("killtracker")
 
 DEFAULT_REGION = "0.785,0.004,0.110,0.028"
 CONFIRM_FRAMES = 3
@@ -90,7 +93,7 @@ def _build_extract_cmd(vod_path: str, region: str, fps: float,
 
 
 def extract_frames(vod_path: str, region: str, fps: float,
-                   stop_event=None) -> "generator[tuple[float, np.ndarray]]":
+                   stop_event=None) -> Iterator[tuple[float, np.ndarray]]:
     """Amostra frames da região a `fps`. Usa decode por hardware (d3d11va)
     quando disponível, com fallback para decode por software."""
     for hwaccel in (True, False):
@@ -101,6 +104,7 @@ def extract_frames(vod_path: str, region: str, fps: float,
         frame_size = pw * ph * 3
         idx = 0
         try:
+            assert proc.stdout is not None
             first = proc.stdout.read(frame_size)
             if not first or len(first) < frame_size:
                 proc.kill()
@@ -121,6 +125,7 @@ def extract_frames(vod_path: str, region: str, fps: float,
         finally:
             if proc.poll() is None:
                 proc.kill()
+            assert proc.stdout is not None
             proc.stdout.close()
             proc.wait()
 
@@ -157,7 +162,8 @@ def _kills_slot_vector(img: np.ndarray, x_origin: float,
     r0 = max(0, r0 - 1)
     r1 = min(len(rows), r1 + 1)
     crop = gray[r0:r1].astype(np.uint8)
-    small = np.array(Image.fromarray(crop).resize((26, 12), Image.LANCZOS),
+    small = np.array(Image.fromarray(crop).resize(
+        (26, 12), Image.Resampling.LANCZOS),
                      dtype=np.float64).ravel()
     small = (small - small.min()) / max(1e-6, small.max() - small.min())
     return small - small.mean()
@@ -280,7 +286,7 @@ def _column_value(name: str, text: str) -> int | None:
 def _ocr_groups(img: np.ndarray) -> list[tuple[int, int, str]]:
     _ensure_tesseract()
     pil = _inverted_gray(img)
-    pil = pil.resize((pil.width * 3, pil.height * 3), Image.LANCZOS)
+    pil = pil.resize((pil.width * 3, pil.height * 3), Image.Resampling.LANCZOS)
     data = pytesseract.image_to_data(
         pil, config="--psm 6", output_type=pytesseract.Output.DICT)
     out: list[tuple[int, int, str]] = []
@@ -321,7 +327,7 @@ def _split_wide_token(text: str, n: int,
 
 
 def parse_kill_total(img: np.ndarray, x_origin: float = 0.0,
-                     region_w: float = 1.0) -> tuple[int, ...] | None:
+                     region_w: float = 1.0) -> tuple[int | None, ...] | None:
     """Lê as kills do streamer (1ª número do KDA) da faixa superior direita.
 
     A coluna é lida num recorte (banda) isolado por OCR psm 6, escolhendo o
@@ -374,8 +380,10 @@ def _band_value(img: np.ndarray, groups: list[tuple[int, int, str]],
     return None
 
 
-def increment_events(samples: list[tuple[float, tuple[int, ...] | None]],
-                     confirm_frames: int = CONFIRM_FRAMES) -> list[tuple[float, str, int]]:
+def increment_events(
+        samples: list[tuple[float, tuple[int, ...] | None]],
+        confirm_frames: int = CONFIRM_FRAMES
+) -> list[tuple[float, str, int]]:
     """Dispara quando a KILL do streamer (1ª número do KDA) incrementa.
 
     - Saltos de até MAX_KILL_JUMP confirmados em `confirm_frames` → evento.
@@ -454,7 +462,7 @@ def increment_events(samples: list[tuple[float, tuple[int, ...] | None]],
 
 def save_sample(img: np.ndarray, path: str) -> None:
     Image.fromarray(img).resize((img.shape[1] * 3, img.shape[0] * 3),
-                                Image.LANCZOS).save(path)
+                                Image.Resampling.LANCZOS).save(path)
 
 
 def save_full_frames(vod_path: str, work_dir: str, duration: float) -> list[str]:
@@ -478,7 +486,7 @@ def save_full_frames(vod_path: str, work_dir: str, duration: float) -> list[str]
 def detect_kill_events(vod_path: str, region: str = DEFAULT_REGION,
                        fps: float = 1.0, confirm_frames: int = CONFIRM_FRAMES,
                        work_dir: str = "work", progress_cb=None,
-                       log_cb=None, stop_event=None) -> list[tuple[float, str, int]]:
+                       stop_event=None) -> list[tuple[float, str, int]]:
     os.makedirs(work_dir, exist_ok=True)
     duration = 0.0
     try:
@@ -487,9 +495,8 @@ def detect_kill_events(vod_path: str, region: str = DEFAULT_REGION,
     except Exception:
         duration = 0.0
 
-    if log_cb is not None:
-        log_cb(f"killtracker: região {region} a {fps} fps; "
-               f"amostras de calibração em {work_dir}")
+    log.info("killtracker: região %s a %s fps; "
+             "amostras de calibração em %s", region, fps, work_dir)
     save_full_frames(vod_path, work_dir, duration)
 
     fx, _fy, fw, _fh = parse_region(region)
@@ -510,15 +517,15 @@ def detect_kill_events(vod_path: str, region: str = DEFAULT_REGION,
             vec = _kills_slot_vector(img, fx, fw)
         except Exception as e:
             vec = None
-            if log_cb is not None:
-                log_cb(f"killtracker: falha no frame {frame_count}: {e}")
+            log.warning("killtracker: falha no frame %s: %s", frame_count, e)
         if vec is None:
             failed_streak += 1
         else:
             failed_streak = 0
         samples.append((ts, vec))
 
-    if failed_streak >= max(5, frame_count // 4) and log_cb is not None:
-        log_cb("killtracker: placar não reconhecido em vários frames. "
-               f"Ajuste a região de leitura e confira {work_dir}/frame_sample.png")
+    if failed_streak >= max(5, frame_count // 4):
+        log.warning("killtracker: placar não reconhecido em vários frames. "
+                    "Ajuste a região de leitura e confira %s/frame_sample.png",
+                    work_dir)
     return _events_from_signatures(samples, confirm_frames)

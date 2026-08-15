@@ -1,11 +1,12 @@
+import copy
 import os
 import queue
 import subprocess
-import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from config import LANGUAGES, MODEL_SIZES, MODE_CHOICES, Config
+import log as log_module
+from config import CONFIG_FILE, LANGUAGES, MODE_CHOICES, MODEL_SIZES, Config
 from worker import Worker
 
 PHASES = ["download", "transcribe", "kills", "clip"]
@@ -24,7 +25,10 @@ class App(tk.Tk):
         self.geometry("720x660")
         self.events = queue.Queue()
         self.worker: Worker | None = None
+        self.cfg = Config.from_file(CONFIG_FILE)
+        log_module.setup(lambda ev: self.events.put(ev))
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll)
 
     def _build_ui(self):
@@ -33,9 +37,11 @@ class App(tk.Tk):
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(1, weight=1)
 
-        ttk.Label(frame, text="URL do VOD da Twitch").grid(row=0, column=0, sticky="w", **pad)
+        ttk.Label(frame, text="URL do VOD da Twitch").grid(
+            row=0, column=0, sticky="w", **pad)
         self.url_var = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.url_var).grid(row=0, column=1, sticky="ew", **pad)
+        ttk.Entry(frame, textvariable=self.url_var).grid(
+            row=0, column=1, sticky="ew", **pad)
 
         ttk.Label(frame, text="Arquivo local (opcional)").grid(
             row=1, column=0, sticky="w", **pad)
@@ -47,7 +53,7 @@ class App(tk.Tk):
 
         ttk.Label(frame, text="Palavras-chave (separadas por vírgula)").grid(
             row=2, column=0, sticky="w", **pad)
-        self.keywords_var = tk.StringVar(value=Config().keywords)
+        self.keywords_var = tk.StringVar(value=self.cfg.keywords)
         ttk.Entry(frame, textvariable=self.keywords_var).grid(
             row=2, column=1, sticky="ew", **pad)
 
@@ -57,42 +63,43 @@ class App(tk.Tk):
             opts.columnconfigure(col, weight=1)
 
         ttk.Label(opts, text="Modelo Whisper").grid(row=0, column=0, sticky="w")
-        self.model_var = tk.StringVar(value=Config().model)
+        self.model_var = tk.StringVar(value=self.cfg.model)
         ttk.Combobox(opts, textvariable=self.model_var, values=MODEL_SIZES,
                      state="readonly", width=12).grid(row=1, column=0, sticky="w")
 
         ttk.Label(opts, text="Antes (s)").grid(row=0, column=1, sticky="w")
-        self.before_var = tk.DoubleVar(value=Config().offset_before)
+        self.before_var = tk.DoubleVar(value=self.cfg.offset_before)
         ttk.Spinbox(opts, from_=0, to=60, increment=1, textvariable=self.before_var,
                     width=8).grid(row=1, column=1, sticky="w")
 
         ttk.Label(opts, text="Duração (s)").grid(row=0, column=2, sticky="w")
-        self.length_var = tk.DoubleVar(value=Config().clip_length)
+        self.length_var = tk.DoubleVar(value=self.cfg.clip_length)
         ttk.Spinbox(opts, from_=5, to=300, increment=5, textvariable=self.length_var,
                     width=8).grid(row=1, column=2, sticky="w")
 
         ttk.Label(opts, text="Unir hits < (s)").grid(row=0, column=3, sticky="w")
-        self.merge_var = tk.DoubleVar(value=Config().merge_window)
+        self.merge_var = tk.DoubleVar(value=self.cfg.merge_window)
         ttk.Spinbox(opts, from_=0, to=120, increment=1, textvariable=self.merge_var,
                     width=8).grid(row=1, column=3, sticky="w")
 
-        ttk.Label(opts, text="Idioma do áudio").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self.language_var = tk.StringVar(value=Config().language)
+        ttk.Label(opts, text="Idioma do áudio").grid(
+            row=2, column=0, sticky="w", pady=(6, 0))
+        self.language_var = tk.StringVar(value=self.cfg.language)
         ttk.Combobox(opts, textvariable=self.language_var, values=LANGUAGES,
                      state="readonly", width=12).grid(row=3, column=0, sticky="w")
 
         ttk.Label(opts, text="Detecção").grid(row=2, column=2, sticky="w", pady=(6, 0))
-        self.mode_var = tk.StringVar(value=Config().mode)
+        self.mode_var = tk.StringVar(value=self.cfg.mode)
         ttk.Combobox(opts, textvariable=self.mode_var, values=MODE_CHOICES,
                      state="readonly", width=12).grid(row=3, column=2, sticky="w")
 
         ttk.Label(opts, text="Região placar (x,y,w,h)").grid(
             row=2, column=3, sticky="w", pady=(6, 0))
-        self.region_var = tk.StringVar(value=Config().kill_region)
+        self.region_var = tk.StringVar(value=self.cfg.kill_region)
         ttk.Entry(opts, textvariable=self.region_var, width=16).grid(
             row=3, column=3, sticky="w")
 
-        self.vad_var = tk.BooleanVar(value=Config().vad_filter)
+        self.vad_var = tk.BooleanVar(value=self.cfg.vad_filter)
         ttk.Checkbutton(opts, text="Filtrar silêncio (VAD)",
                         variable=self.vad_var).grid(row=3, column=1, sticky="w",
                                                    pady=(6, 0))
@@ -101,11 +108,12 @@ class App(tk.Tk):
         out.grid(row=4, column=0, columnspan=2, sticky="ew", **pad)
         out.columnconfigure(1, weight=1)
         ttk.Label(out, text="Pasta de saída").grid(row=0, column=0, sticky="w")
-        self.out_dir_var = tk.StringVar(value=Config().output_dir)
+        self.out_dir_var = tk.StringVar(value=self.cfg.output_dir)
         ttk.Entry(out, textvariable=self.out_dir_var).grid(row=0, column=1, sticky="ew")
-        ttk.Button(out, text="...", width=3, command=self._choose_dir).grid(row=0, column=2)
+        ttk.Button(out, text="...", width=3, command=self._choose_dir).grid(
+            row=0, column=2)
 
-        self.delete_var = tk.BooleanVar(value=Config().delete_vod)
+        self.delete_var = tk.BooleanVar(value=self.cfg.delete_vod)
         ttk.Checkbutton(frame, text="Apagar o VOD após cortar",
                         variable=self.delete_var).grid(
             row=5, column=0, columnspan=2, sticky="w", **pad)
@@ -155,28 +163,37 @@ class App(tk.Tk):
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _current_cfg(self) -> Config:
+        cfg = copy.copy(self.cfg)
+        cfg.url = self.url_var.get().strip()
+        cfg.local_file = self.local_file_var.get().strip()
+        cfg.keywords = self.keywords_var.get().strip()
+        cfg.model = self.model_var.get()
+        cfg.language = self.language_var.get()
+        cfg.offset_before = float(self.before_var.get())
+        cfg.clip_length = float(self.length_var.get())
+        cfg.merge_window = float(self.merge_var.get())
+        cfg.mode = self.mode_var.get()
+        cfg.kill_region = self.region_var.get().strip() or Config().kill_region
+        cfg.output_dir = self.out_dir_var.get().strip() or "output"
+        cfg.delete_vod = self.delete_var.get()
+        cfg.vad_filter = self.vad_var.get()
+        return cfg
+
+    def _on_close(self):
+        try:
+            self._current_cfg().save()
+        finally:
+            self.destroy()
+
     def _start(self):
-        url = self.url_var.get().strip()
-        local_file = self.local_file_var.get().strip()
-        if not url and not local_file:
+        cfg = self._current_cfg()
+        if not cfg.url and not cfg.local_file:
             messagebox.showerror("Falta fonte",
                                  "Informe a URL do VOD da Twitch ou um arquivo local.")
             return
-        cfg = Config(
-            url=url,
-            local_file=local_file,
-            keywords=self.keywords_var.get().strip(),
-            model=self.model_var.get(),
-            language=self.language_var.get(),
-            offset_before=float(self.before_var.get()),
-            clip_length=float(self.length_var.get()),
-            merge_window=float(self.merge_var.get()),
-            mode=self.mode_var.get(),
-            kill_region=self.region_var.get().strip() or Config().kill_region,
-            output_dir=self.out_dir_var.get().strip() or "output",
-            delete_vod=self.delete_var.get(),
-            vad_filter=self.vad_var.get(),
-        )
+        self.cfg = cfg
+        cfg.save()
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
@@ -211,10 +228,14 @@ class App(tk.Tk):
             fraction = ev.get("fraction")
             if fraction is not None:
                 self.progress["value"] = fraction * 100
-            self.status_var.set(f"{PHASE_LABEL.get(phase, phase)} — {ev.get('status', '')}")
+            status = ev.get("status", "")
+            self.status_var.set(f"{PHASE_LABEL.get(phase, phase)} — {status}")
         elif t == "clip_done":
             c = ev["clip"]
             self._append_log(f"OK clipe: {c.file}")
+        elif t == "warning":
+            self._append_log(f"AVISO: {ev['message']}")
+            self.status_var.set("Atenção — veja o log.")
         elif t == "done":
             clips = ev["clips"]
             n = len(clips)

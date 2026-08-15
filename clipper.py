@@ -3,7 +3,10 @@ import os
 import shutil
 import subprocess
 
+from log import get_logger
+
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+log = get_logger("clipper")
 
 # Altura máxima de saída: VOD acima disso (1440p/1600p/4K) é reduzido para 1080p.
 MAX_OUTPUT_HEIGHT = 1080
@@ -96,7 +99,7 @@ def cut_clip(vod_path: str, out_path: str, start: float, length: float) -> None:
     subprocess.run(cmd, check=True, creationflags=CREATE_NO_WINDOW)
     ok, msg = _verify_clip(out_path, length, max_height=MAX_OUTPUT_HEIGHT)
     if not ok:
-        print(f"AVISO: clipe {out_path} com problema: {msg}")
+        log.warning("AVISO: clipe %s com problema: %s", out_path, msg)
 
 
 def _verify_clip(out_path: str, expected_length: float,
@@ -153,7 +156,7 @@ def _verify_clip(out_path: str, expected_length: float,
 
 def ensure_1080p(vod_path: str, work_dir: str,
                  max_height: int = MAX_OUTPUT_HEIGHT,
-                 progress_cb=None, log_cb=None) -> tuple[str, str]:
+                 progress_cb=None) -> tuple[str, str]:
     """Garante um VOD de trabalho com altura <= max_height.
 
     Se a altura já for <= max_height, devolve (vod_path, vod_path) sem tocar
@@ -166,8 +169,7 @@ def ensure_1080p(vod_path: str, work_dir: str,
     try:
         height = video_size(vod_path)[1]
     except Exception as e:
-        if log_cb is not None:
-            log_cb(f"não foi possível medir o VOD ({e}); seguindo sem transcode.")
+        log.warning("não foi possível medir o VOD (%s); seguindo sem transcode.", e)
         return vod_path, vod_path
     if height <= max_height:
         return vod_path, vod_path
@@ -179,9 +181,8 @@ def ensure_1080p(vod_path: str, work_dir: str,
         duration = ffprobe_duration(vod_path)
     except Exception:
         pass
-    if log_cb is not None:
-        log_cb(f"VOD com altura {height} > {max_height}: "
-               f"transcodando para {max_height}p...")
+    log.info("VOD com altura %s > %s: transcodando para %sp...",
+             height, max_height, max_height)
 
     cmd_base = [
         _which("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
@@ -208,6 +209,7 @@ def ensure_1080p(vod_path: str, work_dir: str,
                                 creationflags=CREATE_NO_WINDOW)
         out_time_us = 0.0
         try:
+            assert proc.stdout is not None
             for raw in proc.stdout:
                 line = raw.decode(errors="replace").strip()
                 if line.startswith("out_time_us="):
@@ -229,15 +231,13 @@ def ensure_1080p(vod_path: str, work_dir: str,
             continue
         break
     if proc is None or proc.returncode != 0:
-        if log_cb is not None:
-            log_cb("transcode falhou; usando o VOD original.")
+        log.warning("transcode falhou; usando o VOD original.")
         return vod_path, vod_path
 
     ok, msg = _verify_clip(out_path, duration, max_height=max_height)
     if not ok:
-        if log_cb is not None:
-            log_cb(f"transcode não passou na verificação ({msg}); "
-                   "usando o VOD original.")
+        log.warning("transcode não passou na verificação (%s); "
+                    "usando o VOD original.", msg)
         return vod_path, vod_path
     if progress_cb is not None:
         progress_cb(1.0)
